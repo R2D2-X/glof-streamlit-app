@@ -13,3 +13,6 @@ joblib
 retrying
 numpy
 pandas
+Flask
+jsonify
+request
