@@ -1,6 +1,15 @@
 streamlit
 folium
 streamlit-folium
+sentinelhub
+openmeteo-requests
+planetary_computer
+pystac-client
+stackstac
+rioxarray
 rasterio
+matplotlib
+joblib
+retrying
 numpy
-requests
+pandas
