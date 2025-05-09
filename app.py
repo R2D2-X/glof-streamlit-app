@@ -1,81 +1,40 @@
-from flask import Flask, jsonify, request
-import backend  # Assuming the backend.py file is in the same directory
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+from backend import RealTimeGLOFMonitor, download_copernicus_dem, compute_dem_statistics, prepare_features, load_model, make_prediction
 
-app = Flask(__name__)
+# Main app layout
+st.title("GLOF Real-Time Monitoring System")
 
-@app.route('/')
-def index():
-    return "Welcome to the GLOF Monitoring API!"
+# Input: Coordinates of the lake (this can be adjusted based on your needs)
+latitude = st.number_input("Enter Latitude:", value=53.5587)
+longitude = st.number_input("Enter Longitude:", value=108.1650)
 
-@app.route('/fetch_data', methods=['GET'])
-def fetch_data():
-    try:
-        # Sample lake coordinates (you can get these from the request)
-        lat = float(request.args.get('lat', 53.5587))  # default to 53.5587
-        lon = float(request.args.get('lon', 108.1650))  # default to 108.1650
-        radius_km = int(request.args.get('radius_km', 5))  # default to 5 km radius
+# Fetch Data Button
+if st.button('Fetch Data'):
+    monitor = RealTimeGLOFMonitor((latitude, longitude))
 
-        # Initialize the RealTimeGLOFMonitor with provided coordinates
-        monitor = backend.RealTimeGLOFMonitor((lat, lon), radius_km)
+    # Fetch Satellite Data
+    result = monitor.fetch_all_data()
+    if not result.empty:
+        st.subheader("Satellite Data")
+        st.write(result[['timestamp', 'lake_area_km2', 'expansion_rate_pct', 'precipitation_mm']])
 
-        # Fetch all data
-        data = monitor.fetch_all_data()
+    # Fetch DEM Data
+    dem_file = download_copernicus_dem(latitude, longitude, radius_km=1)
+    if dem_file:
+        stats = compute_dem_statistics(dem_file)
+        st.subheader("DEM Statistics")
+        for key, value in stats.items():
+            st.write(f"{key}: {value}")
 
-        if not data.empty:
-            return jsonify(data.to_dict(orient='records')[0]), 200  # Return data as JSON
+        # If valid satellite data is available, make a prediction
+        if 'lake_area_km2' in result.columns:
+            lake_area_km2 = result['lake_area_km2'].values[0]
+            features = prepare_features(lake_area_km2, stats)
+            model = load_model('best_rf_model.pkl')  # Ensure the model is available in the correct location
+            prediction = make_prediction(model, features)
+            st.subheader("Prediction")
+            st.write(f"GLOF Risk Prediction: {prediction}")
         else:
-            return jsonify({"error": "Data collection failed"}), 500
-
-    except Exception as e:
-        return jsonify({"error": f"System error: {str(e)}"}), 500
-
-@app.route('/get_dem_statistics', methods=['GET'])
-def get_dem_statistics():
-    try:
-        lat = float(request.args.get('lat', 53.5587))
-        lon = float(request.args.get('lon', 108.1650))
-        radius_km = int(request.args.get('radius_km', 1))
-
-        # Download Copernicus DEM
-        dem_file = backend.download_copernicus_dem(lat, lon, radius_km)
-        
-        if dem_file:
-            # Compute DEM statistics
-            stats = backend.compute_dem_statistics(dem_file)
-            if stats:
-                return jsonify(stats), 200
-            else:
-                return jsonify({"error": "DEM statistics could not be computed"}), 500
-        else:
-            return jsonify({"error": "DEM file not found"}), 500
-
-    except Exception as e:
-        return jsonify({"error": f"System error: {str(e)}"}), 500
-
-@app.route('/make_prediction', methods=['POST'])
-def make_prediction():
-    try:
-        # Get data from the request (JSON body)
-        data = request.get_json()
-
-        if not data or 'lake_area_km2' not in data or 'dem_stats' not in data:
-            return jsonify({"error": "Invalid input data"}), 400
-
-        lake_area_km2 = data['lake_area_km2']
-        dem_stats = data['dem_stats']
-
-        # Prepare features for prediction
-        features = backend.prepare_features(lake_area_km2, dem_stats)
-
-        # Load the model and make prediction
-        model = backend.load_model('best_rf_model.pkl')
-        prediction = backend.make_prediction(model, features)
-
-        return jsonify({"prediction": prediction}), 200
-
-    except Exception as e:
-        return jsonify({"error": f"System error: {str(e)}"}), 500
-
-
-if __name__ == '__main__':
-    app.run(debug=True)
+            st.write("No valid satellite data available for prediction.")
