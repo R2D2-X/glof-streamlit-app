@@ -1,82 +1,81 @@
-import streamlit as st
-import folium
-from streamlit_folium import st_folium
-from backend import get_dem_statistics, RealTimeGLOFMonitor, prepare_features, load_model, make_prediction
-import os
+from flask import Flask, jsonify, request
+import backend  # Assuming the backend.py file is in the same directory
 
-st.set_page_config(page_title="GLOF Monitoring App", layout="wide")
-st.title("🧊 Glacial Lake Outburst Flood (GLOF) Monitoring")
+app = Flask(__name__)
 
-st.markdown("""
-This app allows users to:
-- Enter latitude and longitude coordinates.
-- Visualize the location on a map.
-- Retrieve Digital Elevation Model (DEM) statistics.
-- Fetch satellite-based lake expansion data.
-- Get weather data.
-- Run machine learning model for GLOF risk prediction.
-""")
+@app.route('/')
+def index():
+    return "Welcome to the GLOF Monitoring API!"
 
-# Sidebar inputs
-st.sidebar.header("Input Coordinates")
-latitude = st.sidebar.number_input("Latitude", value=27.98, format="%.6f")
-longitude = st.sidebar.number_input("Longitude", value=86.92, format="%.6f")
+@app.route('/fetch_data', methods=['GET'])
+def fetch_data():
+    try:
+        # Sample lake coordinates (you can get these from the request)
+        lat = float(request.args.get('lat', 53.5587))  # default to 53.5587
+        lon = float(request.args.get('lon', 108.1650))  # default to 108.1650
+        radius_km = int(request.args.get('radius_km', 5))  # default to 5 km radius
 
-if st.sidebar.button("Analyze"):
-    with st.spinner("Fetching data from all endpoints..."):
-        monitor = RealTimeGLOFMonitor((latitude, longitude))
+        # Initialize the RealTimeGLOFMonitor with provided coordinates
+        monitor = backend.RealTimeGLOFMonitor((lat, lon), radius_km)
 
-        # Satellite + Weather
-        realtime_df = monitor.fetch_all_data()
+        # Fetch all data
+        data = monitor.fetch_all_data()
 
-        # DEM stats
-        dem_stats = get_dem_statistics(latitude, longitude)
-
-        # Display on map
-        st.subheader("📍 Selected Location")
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            st.write(f"**Latitude:** {latitude}")
-            st.write(f"**Longitude:** {longitude}")
-        with col2:
-            m = folium.Map(location=[latitude, longitude], zoom_start=11)
-            folium.Marker([latitude, longitude], tooltip="Selected Point").add_to(m)
-            st_folium(m, width=700, height=500)
-
-        # Display Satellite + Weather
-        if not realtime_df.empty:
-            st.success("✅ Fetched Satellite and Weather Data")
-            st.subheader("🛰️ Satellite & Weather Data")
-            st.dataframe(realtime_df)
-
+        if not data.empty:
+            return jsonify(data.to_dict(orient='records')[0]), 200  # Return data as JSON
         else:
-            st.error("❌ Failed to retrieve satellite/weather data.")
+            return jsonify({"error": "Data collection failed"}), 500
 
-        # Display DEM
-        if dem_stats:
-            st.success("✅ DEM Statistics Retrieved")
-            st.subheader("🌐 DEM Statistics")
-            st.json(dem_stats)
+    except Exception as e:
+        return jsonify({"error": f"System error: {str(e)}"}), 500
+
+@app.route('/get_dem_statistics', methods=['GET'])
+def get_dem_statistics():
+    try:
+        lat = float(request.args.get('lat', 53.5587))
+        lon = float(request.args.get('lon', 108.1650))
+        radius_km = int(request.args.get('radius_km', 1))
+
+        # Download Copernicus DEM
+        dem_file = backend.download_copernicus_dem(lat, lon, radius_km)
+        
+        if dem_file:
+            # Compute DEM statistics
+            stats = backend.compute_dem_statistics(dem_file)
+            if stats:
+                return jsonify(stats), 200
+            else:
+                return jsonify({"error": "DEM statistics could not be computed"}), 500
         else:
-            st.error("❌ Failed to retrieve DEM statistics.")
+            return jsonify({"error": "DEM file not found"}), 500
 
-        # Prediction
-        if dem_stats and not realtime_df.empty and "lake_area_km2" in realtime_df.columns:
-            try:
-                lake_area_km2 = realtime_df["lake_area_km2"].values[0]
-                features = prepare_features(lake_area_km2, dem_stats)
+    except Exception as e:
+        return jsonify({"error": f"System error: {str(e)}"}), 500
 
-                if os.path.exists("best_rf_model.pkl"):
-                    model = load_model("best_rf_model.pkl")
-                    prediction = make_prediction(model, features)
-                    st.success("✅ GLOF Risk Prediction Complete")
-                    st.subheader("🔮 Prediction Result")
-                    st.write(f"**Predicted Risk Label:** `{prediction}`")
-                else:
-                    st.warning("⚠️ Model file not found. Skipping prediction.")
-            except Exception as e:
-                st.error(f"❌ Prediction failed: {str(e)}")
-        else:
-            st.warning("⚠️ Insufficient data to perform prediction.")
-else:
-    st.info("👈 Enter coordinates and click Analyze to begin.")
+@app.route('/make_prediction', methods=['POST'])
+def make_prediction():
+    try:
+        # Get data from the request (JSON body)
+        data = request.get_json()
+
+        if not data or 'lake_area_km2' not in data or 'dem_stats' not in data:
+            return jsonify({"error": "Invalid input data"}), 400
+
+        lake_area_km2 = data['lake_area_km2']
+        dem_stats = data['dem_stats']
+
+        # Prepare features for prediction
+        features = backend.prepare_features(lake_area_km2, dem_stats)
+
+        # Load the model and make prediction
+        model = backend.load_model('best_rf_model.pkl')
+        prediction = backend.make_prediction(model, features)
+
+        return jsonify({"prediction": prediction}), 200
+
+    except Exception as e:
+        return jsonify({"error": f"System error: {str(e)}"}), 500
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
