@@ -12,3 +12,4 @@ pystac_client
 stackstac
 rioxarray
 rasterio
+scikit-learn
