@@ -85,7 +85,7 @@ class RealTimeGLOFMonitor:
         if img.ndim == 3:
             img = img[:, :, 0]
 
-        water_mask = (img > 0.02) & (~np.isnan(img))
+        water_mask = (img > -0.1) & (~np.isnan(img))
         water_area = np.sum(water_mask) * (self.bbox_area / (512 * 512))
 
         if self.last_area and self.last_update:
