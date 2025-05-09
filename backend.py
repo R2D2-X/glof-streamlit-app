@@ -254,3 +254,18 @@ def prepare_features(lake_area_km2, dem_stats):
                                 'zmean_m'
                             ])
     return
+
+def make_prediction(model, features):
+    try:
+        prediction = model.predict(features)[0]
+        proba = model.predict_proba(features)[0].max()
+        return {
+            "risk_label": prediction,
+            "confidence": round(proba * 100, 2)
+        }
+    except Exception as e:
+        logging.error(f"Error during prediction: {str(e)}")
+        return {
+            "risk_label": "Error",
+            "confidence": 0.0
+        }
