@@ -13,6 +13,5 @@ joblib
 retrying
 numpy
 pandas
-Flask
-jsonify
+flask
 request
