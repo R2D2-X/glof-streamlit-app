@@ -3,20 +3,23 @@ import pandas as pd
 import datetime
 from datetime import timedelta
 import numpy as np
-from sentinelhub import SHConfig, BBox, CRS, SentinelHubRequest, DataCollection, MimeType
-import openmeteo_requests
-import retrying
-import math
-import planetary_computer
-from pystac_client import Client
-import stackstac
-import rioxarray
-import rasterio
-import matplotlib.pyplot as plt
 import os
+import tempfile
 import joblib
 import logging
+import math
+import rioxarray
+import rasterio
+import openmeteo_requests
+import retrying
+import stackstac
+from pystac_client import Client
+import planetary_computer
+from sentinelhub import SHConfig, BBox, CRS, SentinelHubRequest, DataCollection, MimeType
 
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 
 class RealTimeGLOFMonitor:
     def __init__(self, lake_coords: tuple, radius_km: int = 5):
@@ -121,7 +124,7 @@ class RealTimeGLOFMonitor:
                 "weather_timestamp": datetime.datetime.utcnow().isoformat()
             }
         except Exception as e:
-            print(f"Weather API error: {str(e)}")
+            logging.error(f"Weather API error: {str(e)}")
             return {
                 "temperature_c": None,
                 "precipitation_mm": None,
@@ -142,75 +145,97 @@ class RealTimeGLOFMonitor:
             return pd.DataFrame([combined])
 
         except Exception as e:
-            print(f"Data collection failed: {str(e)}")
+            logging.error(f"Data collection failed: {str(e)}")
             return pd.DataFrame()
 
 
-def download_copernicus_dem(lat, lon, radius_km=1, save_path="/content/dem_copernicus.tif"):
-    buffer_deg = radius_km / 111
-    min_lon = lon - buffer_deg
-    min_lat = lat - buffer_deg
-    max_lon = lon + buffer_deg
-    max_lat = lat + buffer_deg
+def download_copernicus_dem(lat, lon, radius_km=1, save_path=None):
+    try:
+        buffer_deg = radius_km / 111
+        min_lon = lon - buffer_deg
+        min_lat = lat - buffer_deg
+        max_lon = lon + buffer_deg
+        max_lat = lat + buffer_deg
 
-    print(f"Querying Copernicus DEM for bounds: ({min_lon}, {min_lat}, {max_lon}, {max_lat})")
+        logging.info(f"Querying Copernicus DEM for bounds: ({min_lon}, {min_lat}, {max_lon}, {max_lat})")
 
-    catalog = Client.open("https://planetarycomputer.microsoft.com/api/stac/v1")
+        # Use temporary directory for cloud environments if no save_path is provided
+        if not save_path:
+            temp_dir = tempfile.gettempdir()
+            save_path = os.path.join(temp_dir, "dem_copernicus.tif")
 
-    search = catalog.search(
-        collections=["cop-dem-glo-30"],
-        bbox=[min_lon, min_lat, max_lon, max_lat],
-        limit=1,
-    )
+        catalog = Client.open("https://planetarycomputer.microsoft.com/api/stac/v1")
 
-    items = list(search.items())
-    if len(items) == 0:
-        print("No DEM found for this area.")
+        search = catalog.search(
+            collections=["cop-dem-glo-30"],
+            bbox=[min_lon, min_lat, max_lon, max_lat],
+            limit=1,
+        )
+
+        items = list(search.items())
+        if len(items) == 0:
+            logging.error("No DEM found for this area.")
+            return None
+
+        item = items[0]
+        signed_item = planetary_computer.sign(item)
+
+        dem = stackstac.stack([signed_item], assets=["data"], bounds=(min_lon, min_lat, max_lon, max_lat), epsg=4326).squeeze()
+        
+        # Save the DEM to the specified path
+        dem.rio.to_raster(save_path)
+
+        logging.info(f"DEM downloaded and saved at {save_path}")
+
+        return save_path
+
+    except Exception as e:
+        logging.error(f"Error downloading Copernicus DEM: {str(e)}")
         return None
-
-    item = items[0]
-    signed_item = planetary_computer.sign(item)
-
-    dem = stackstac.stack([signed_item], assets=["data"], bounds=(min_lon, min_lat, max_lon, max_lat), epsg=4326).squeeze()
-    dem.rio.to_raster(save_path)
-    print(f"DEM downloaded and saved at {save_path}")
-    return save_path
 
 
 def compute_dem_statistics(dem_path):
-    with rasterio.open(dem_path) as src:
-        elevation_data = src.read(1)
-        transform = src.transform
+    try:
+        with rasterio.open(dem_path) as src:
+            elevation_data = src.read(1)
+            transform = src.transform
 
-    elevation_data = np.where(elevation_data == src.nodata, np.nan, elevation_data)
-    if np.all(np.isnan(elevation_data)):
-        print("DEM contains only NaN values. Cannot compute statistics.")
+        elevation_data = np.where(elevation_data == src.nodata, np.nan, elevation_data)
+        if np.all(np.isnan(elevation_data)):
+            logging.error("DEM contains only NaN values. Cannot compute statistics.")
+            return None
+
+        x_res = transform[0]
+        y_res = -transform[4]
+
+        grad_y, grad_x = np.gradient(elevation_data, y_res, x_res)
+        slope_rad = np.arctan(np.sqrt(np.maximum(grad_x ** 2 + grad_y ** 2, 0)))
+        slope_deg = np.degrees(slope_rad)
+
+        zmin_m = np.nanmin(elevation_data)
+        zmax_m = np.nanmax(elevation_data)
+        zmean_m = np.nanmean(elevation_data)
+        mean_slope_deg = np.nanmean(slope_deg)
+        elevation_diff = zmax_m - zmin_m
+
+        return {
+            "mean_slope_deg": round(mean_slope_deg, 2),
+            "elevation_diff_m": round(elevation_diff, 2),
+            "zmin_m": round(zmin_m, 2),
+            "zmax_m": round(zmax_m, 2),
+            "zmean_m": round(zmean_m, 2)
+        }
+    except Exception as e:
+        logging.error(f"Error computing DEM statistics: {str(e)}")
         return None
-
-    x_res = transform[0]
-    y_res = -transform[4]
-
-    grad_y, grad_x = np.gradient(elevation_data, y_res, x_res)
-    slope_rad = np.arctan(np.sqrt(np.maximum(grad_x ** 2 + grad_y ** 2, 0)))
-    slope_deg = np.degrees(slope_rad)
-
-    zmin_m = np.nanmin(elevation_data)
-    zmax_m = np.nanmax(elevation_data)
-    zmean_m = np.nanmean(elevation_data)
-    mean_slope_deg = np.nanmean(slope_deg)
-    elevation_diff = zmax_m - zmin_m
-
-    return {
-        "mean_slope_deg": round(mean_slope_deg, 2),
-        "elevation_diff_m": round(elevation_diff, 2),
-        "zmin_m": round(zmin_m, 2),
-        "zmax_m": round(zmax_m, 2),
-        "zmean_m": round(zmean_m, 2)
-    }
 
 
 def load_model(model_path):
-    return joblib.load(model_path)
+    try:
+        return joblib.load(model_path)
+    except Exception as e:
+        logging.error(f"Error loading model: {str(e)}")
+        return None
 
 
 def prepare_features(lake_area_km2, dem_stats):
@@ -228,45 +253,4 @@ def prepare_features(lake_area_km2, dem_stats):
                                 'zmax_m',
                                 'zmean_m'
                             ])
-    return features
-
-
-def make_prediction(model, features):
-    prediction = model.predict(features)
-    return prediction[0]
-
-
-# -------- MAIN ---------
-if __name__ == "__main__":
-    try:
-        monitor = RealTimeGLOFMonitor((53.5587, 108.1650))  # Example lake coordinates
-
-        result = monitor.fetch_all_data()
-        if not result.empty:
-            print("Successfully fetched data:")
-            print(result[['timestamp', 'lake_area_km2', 'expansion_rate_pct', 'precipitation_mm']])
-
-        # DEM integration
-        lat, lon = 53.5587, 108.1650
-        dem_file = download_copernicus_dem(lat, lon, radius_km=1)
-
-        if dem_file:
-            stats = compute_dem_statistics(dem_file)
-            print("\n--- DEM Statistics ---")
-            for key, value in stats.items():
-                print(f"{key}: {value}")
-
-            # Predict only if satellite data was valid
-            if not result.empty and 'lake_area_km2' in result.columns:
-                lake_area_km2 = result['lake_area_km2'].values[0]
-                features = prepare_features(lake_area_km2, stats)
-                model = load_model('best_rf_model.pkl')
-                prediction = make_prediction(model, features)
-
-                print("\n--- Prediction ---")
-                print("Prediction result:", prediction)
-            else:
-                print("No valid satellite data available for prediction.")
-
-    except Exception as e:
-        print(f"System error: {str(e)}")
+    return
